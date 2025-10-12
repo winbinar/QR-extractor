@@ -1,11 +1,12 @@
 from flask import Flask, request, render_template, send_file
 import cv2
 import numpy as np
+from pyzbar.pyzbar import decode
 from PIL import Image
 import os
 import io
 from datetime import datetime
-from os.path import basename
+from os.path import basename  # Импортируем basename для фильтра
 
 app = Flask(__name__)
 
@@ -15,15 +16,17 @@ if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
 
 # Добавляем Jinja2-фильтр для извлечения имени файла
-app.jinja_env.filters['basename'] = basename
+app.jinja_env.filters['basename'] = basename  # <--- ФИЛЬТР ДОБАВЛЕН ЗДЕСЬ
 
-def align_qr_code(image, points):
+def align_qr_code(image, qr):
     """Выравнивает QR-код и возвращает выровненное изображение."""
-    if points is None or len(points) < 4:
+    # Получаем координаты углов QR-кода
+    points = qr.polygon
+    if len(points) < 4:
         return None
 
     # Извлекаем углы
-    pts = np.array(points, dtype="float32")
+    pts = np.array([(p.x, p.y) for p in points], dtype="float32")
 
     # Определяем размеры QR-кода
     width = int(np.sqrt((pts[0][0] - pts[1][0])**2 + (pts[0][1] - pts[1][1])**2))
@@ -46,30 +49,26 @@ def align_qr_code(image, points):
     return aligned
 
 def process_image(file_path):
-    """Обрабатывает изображение, находит и выравнивает QR-коды с помощью OpenCV."""
+    """Обрабатывает изображение, находит и выравнивает QR-коды."""
     # Читаем изображение
     image = cv2.imread(file_path)
     if image is None:
         return None, "Ошибка: не удалось загрузить изображение."
 
-    # Конвертируем в оттенки серого
+    # Конвертируем в оттенки серого для декодирования
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-    # Используем OpenCV QRCodeDetector
-    detector = cv2.QRCodeDetector()
-    try:
-        retval, decoded_info, points, straight_qrcodes = detector.detectAndDecodeMulti(gray)
-        if not retval:
-            return None, "QR-коды не найдены."
-    except Exception as e:
-        return None, f"Ошибка при декодировании QR-кодов: {str(e)}"
+    # Находим QR-коды
+    qr_codes = decode(gray)
+    if not qr_codes:
+        return None, "QR-коды не найдены."
 
     output_files = []
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # Обрабатываем каждый QR-код
-    for i, point_set in enumerate(points):
-        aligned_qr = align_qr_code(image, point_set)
+    for i, qr in enumerate(qr_codes):
+        aligned_qr = align_qr_code(image, qr)
         if aligned_qr is None:
             continue
 

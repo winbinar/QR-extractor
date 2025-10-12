@@ -4,12 +4,10 @@ services:
     env: python
     buildCommand: |
       apt-get update
-      apt-get install -y libzbar0 libzbar-dev zbar-tools
-      ldconfig -v | grep libzbar  # Debug: Check if libzbar is installed
       pip install -r requirements.txt
-    startCommand: python app.py
+    startCommand: gunicorn -w 4 -b 0.0.0.0:10000 app:app
     envVars:
       - key: PYTHON_VERSION
-        value: 3.10  # Switch to 3.10 for better compatibility
-      - key: LD_LIBRARY_PATH
-        value: /usr/lib:/usr/lib/x86_64-linux-gnu:/usr/local/lib
+        value: 3.10
+      - key: PORT
+        value: 10000

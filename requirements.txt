@@ -3,3 +3,4 @@ numpy
 pillow
 opencv-python
 pyzbar
+gunicorn
