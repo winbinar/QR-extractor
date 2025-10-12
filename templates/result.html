@@ -2,16 +2,16 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <title>Результаты обработки</title>
+    <title>Р РµР·СѓР»СЊС‚Р°С‚С‹ РѕР±СЂР°Р±РѕС‚РєРё</title>
 </head>
 <body>
-    <h1>Найденные и выровненные QR-коды</h1>
-    <p>Обнаружено {{ files|length }} QR-кодов:</p>
+    <h1>РќР°Р№РґРµРЅРЅС‹Рµ Рё РІС‹СЂРѕРІРЅРµРЅРЅС‹Рµ QR-РєРѕРґС‹</h1>
+    <p>РћР±РЅР°СЂСѓР¶РµРЅРѕ {{ files|length }} QR-РєРѕРґРѕРІ:</p>
     <ul>
         {% for file in files %}
             <li><a href="/download/{{ file|basename }}" download>{{ file|basename }}</a></li>
         {% endfor %}
     </ul>
-    <a href="/">Загрузить другое изображение</a>
+    <a href="/">Р—Р°РіСЂСѓР·РёС‚СЊ РґСЂСѓРіРѕРµ РёР·РѕР±СЂР°Р¶РµРЅРёРµ</a>
 </body>
 </html>

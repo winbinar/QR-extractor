@@ -2,13 +2,13 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <title>Обработка QR-кодов</title>
+    <title>РћР±СЂР°Р±РѕС‚РєР° QR-РєРѕРґРѕРІ</title>
 </head>
 <body>
-    <h1>Загрузка изображения с QR-кодами</h1>
+    <h1>Р—Р°РіСЂСѓР·РєР° РёР·РѕР±СЂР°Р¶РµРЅРёСЏ СЃ QR-РєРѕРґР°РјРё</h1>
     <form method="post" enctype="multipart/form-data" action="/upload">
         <input type="file" name="file" accept=".jpg">
-        <input type="submit" value="Загрузить">
+        <input type="submit" value="Р—Р°РіСЂСѓР·РёС‚СЊ">
     </form>
     {% if error %}
         <p style="color: red;">{{ error }}</p>
