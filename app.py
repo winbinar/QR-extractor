@@ -1,19 +1,12 @@
-import os
-import sys
 from flask import Flask, request, render_template, send_file
 import cv2
 import numpy as np
-try:
-    from pyzbar.pyzbar import decode
-except ImportError as e:
-    print(f"Failed to import pyzbar: {e}")
-    print(f"LD_LIBRARY_PATH: {os.environ.get('LD_LIBRARY_PATH')}")
-    print(f"ldconfig output: {os.popen('ldconfig -p | grep libzbar').read()}")
-    raise
+from pyzbar.pyzbar import decode
 from PIL import Image
+import os
 import io
 from datetime import datetime
-from os.path import basename
+from os.path import basename  # Импортируем basename для фильтра
 
 app = Flask(__name__)
 
