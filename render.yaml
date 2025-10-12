@@ -1,15 +1,14 @@
 services:
   - type: web
-    name: qr-extractor  # »м€ вашего сервиса
+    name: qr-extractor
     env: python
     buildCommand: |
-      # ”становка системных зависимостей ZBar
-      sudo apt-get update
-      sudo apt-get install -y libzbar0 libzbar-dev zbar-tools
-      
-      # ”становка Python-зависимостей из requirements.txt
+      apt-get update
+      apt-get install -y libzbar0 libzbar-dev zbar-tools
       pip install -r requirements.txt
-    startCommand: python app.py  # »ли gunicorn app:app, если используете WSGI-сервер
+    startCommand: python app.py
     envVars:
       - key: PYTHON_VERSION
-        value: 3.10  # ”кажите вашу версию Python (проверьте в venv)
+        value: 3.13  # Указано 3.13, как в логах
+      - key: LD_LIBRARY_PATH
+        value: /usr/lib:/usr/local/lib  # Добавляем путь к библиотекам
