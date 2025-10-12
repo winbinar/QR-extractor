@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Результаты обработки</title>
+</head>
+<body>
+    <h1>Найденные и выровненные QR-коды</h1>
+    <p>Обнаружено {{ files|length }} QR-кодов:</p>
+    <ul>
+        {% for file in files %}
+            <li><a href="/download/{{ file|basename }}" download>{{ file|basename }}</a></li>
+        {% endfor %}
+    </ul>
+    <a href="/">Загрузить другое изображение</a>
+</body>
+</html>
