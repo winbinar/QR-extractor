@@ -1,6 +1,5 @@
-Flask
-numpy
-pillow
+flask
 opencv-python
-pyzbar
-gunicorn
+pylibdmtx
+pillow
+numpy

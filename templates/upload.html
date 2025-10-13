@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Извлечение DataMatrix-кодов</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 900px;
+            margin: 20px auto;
+            padding: 20px;
+            background-color: #fafafa;
+            color: #333;
+        }
+        h1, h2 {
+            color: #2c3e50;
+        }
+        .info {
+            background: #e8f4fc;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 25px;
+            border-left: 4px solid #3498db;
+        }
+        .upload-area {
+            border: 3px dashed #95a5a6;
+            border-radius: 10px;
+            padding: 40px 20px;
+            text-align: center;
+            background: white;
+            transition: all 0.3s;
+            margin: 20px 0;
+            cursor: pointer;
+        }
+        .upload-area.drag-over {
+            border-color: #2ecc71;
+            background-color: #f0fdf4;
+        }
+        .form-group {
+            margin: 15px 0;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input[type="text"] {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            font-size: 16px;
+        }
+        .btn {
+            background: #3498db;
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-top: 10px;
+        }
+        .btn:hover {
+            background: #2980b9;
+        }
+        #file-input { display: none; }
+        .messages { color: red; margin: 10px 0; }
+    </style>
+</head>
+<body>
+    <h1>🔍 Извлечение DataMatrix-кодов из изображения</h1>
+
+    <div class="info">
+        <h2>ℹ️ Как это работает?</h2>
+        <ul>
+            <li>Загрузите изображение в формате <strong>JPG или PNG</strong>, на котором могут быть один или несколько <strong>DataMatrix-кодов</strong>.</li>
+            <li>Программа автоматически найдёт все коды, даже если они повёрнуты или частично искажены.</li>
+            <li>Каждый код будет вырезан и сохранён как отдельный файл.</li>
+            <li>Вы можете указать <strong>имя папки</strong>, в которую сохранить результаты (на сервере).</li>
+            <li>После обработки вы сможете скачать коды по отдельности или <strong>всё сразу в ZIP-архиве</strong>.</li>
+        </ul>
+        <p><strong>Важно:</strong> Файлы сохраняются на сервере временно. Для постоянного хранения скачайте их на свой компьютер.</p>
+    </div>
+
+    {% with messages = get_flashed_messages() %}
+        {% if messages %}
+            <div class="messages">
+                {% for message in messages %}
+                    <p>{{ message }}</p>
+                {% endfor %}
+            </div>
+        {% endif %}
+    {% endwith %}
+
+    <form id="upload-form" method="post" enctype="multipart/form-data">
+        <div class="form-group">
+            <label for="folder_name">📁 Укажите имя папки для сохранения (латиница, цифры, дефисы):</label>
+            <input type="text" id="folder_name" name="folder_name" placeholder="Например: batch_2024" value="output_{{ '%04d'|format(1 + range(1000)|random) }}">
+        </div>
+
+        <div class="upload-area" id="drop-area">
+            <p>Перетащите сюда изображение (JPG/PNG) или</p>
+            <button type="button" class="btn" onclick="document.getElementById('file-input').click()">
+                Выберите файл
+            </button>
+            <input type="file" id="file-input" name="file" accept="image/*">
+        </div>
+    </form>
+
+    <script>
+        const dropArea = document.getElementById('drop-area');
+        const fileInput = document.getElementById('file-input');
+        const form = document.getElementById('upload-form');
+
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+            dropArea.addEventListener(eventName, preventDefaults, false);
+            document.body.addEventListener(eventName, preventDefaults, false);
+        });
+
+        function preventDefaults(e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+
+        ['dragenter', 'dragover'].forEach(eventName => {
+            dropArea.addEventListener(eventName, () => dropArea.classList.add('drag-over'), false);
+        });
+
+        ['dragleave', 'drop'].forEach(eventName => {
+            dropArea.addEventListener(eventName, () => dropArea.classList.remove('drag-over'), false);
+        });
+
+        dropArea.addEventListener('drop', handleDrop, false);
+
+        function handleDrop(e) {
+            const dt = e.dataTransfer;
+            const files = dt.files;
+            if (files.length) {
+                fileInput.files = files;
+                form.submit();
+            }
+        }
+
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length) {
+                form.submit();
+            }
+        });
+    </script>
+</body>
+</html>

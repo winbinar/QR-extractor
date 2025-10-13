@@ -1,120 +1,126 @@
-from flask import Flask, request, render_template, send_file
-import cv2
-import numpy as np
-from pyzbar.pyzbar import decode
-from PIL import Image
 import os
-import io
-from datetime import datetime
-from os.path import basename  # Импортируем basename для фильтра
+import cv2
+import uuid
+import shutil
+from zipfile import ZipFile
+from flask import Flask, request, render_template, redirect, url_for, flash, send_from_directory, send_file
+from pylibdmtx import pylibdmtx
 
 app = Flask(__name__)
+app.secret_key = 'your_secret_key_here'
 
-# Папка для сохранения выровненных QR-кодов
-OUTPUT_DIR = "output_qr_codes"
-if not os.path.exists(OUTPUT_DIR):
-    os.makedirs(OUTPUT_DIR)
+UPLOAD_FOLDER = 'uploads'
+USER_OUTPUTS = 'user_outputs'  # базовая папка для всех пользовательских выходов
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(USER_OUTPUTS, exist_ok=True)
 
-# Добавляем Jinja2-фильтр для извлечения имени файла
-app.jinja_env.filters['basename'] = basename  # <--- ФИЛЬТР ДОБАВЛЕН ЗДЕСЬ
+ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png'}
 
-def align_qr_code(image, qr):
-    """Выравнивает QR-код и возвращает выровненное изображение."""
-    # Получаем координаты углов QR-кода
-    points = qr.polygon
-    if len(points) < 4:
-        return None
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-    # Извлекаем углы
-    pts = np.array([(p.x, p.y) for p in points], dtype="float32")
+def sanitize_folder_name(name):
+    # Удаляем опасные символы, оставляем только буквы, цифры, подчёркивания и дефисы
+    return ''.join(c for c in name if c.isalnum() or c in ('_', '-', ' ')).strip().replace(' ', '_')[:50]
 
-    # Определяем размеры QR-кода
-    width = int(np.sqrt((pts[0][0] - pts[1][0])**2 + (pts[0][1] - pts[1][1])**2))
-    height = int(np.sqrt((pts[1][0] - pts[2][0])**2 + (pts[1][1] - pts[2][1])**2))
+def extract_datamatrix_regions(image_path, output_dir):
+    img = cv2.imread(image_path)
+    if img is None:
+        raise ValueError("Не удалось загрузить изображение")
 
-    # Целевые координаты для выравнивания
-    dst_pts = np.array([
-        [0, 0],
-        [width, 0],
-        [width, height],
-        [0, height]
-    ], dtype="float32")
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    decoded_objects = pylibdmtx.decode(gray, max_count=100)
 
-    # Вычисляем матрицу преобразования
-    M = cv2.getPerspectiveTransform(pts, dst_pts)
+    saved_files = []
+    for i, obj in enumerate(decoded_objects):
+        x, y, w, h = obj.rect.left, obj.rect.top, obj.rect.width, obj.rect.height
+        x = max(0, x)
+        y = max(0, y)
+        w = max(1, w)
+        h = max(1, h)
 
-    # Выполняем преобразование
-    aligned = cv2.warpPerspective(image, M, (width, height))
-
-    return aligned
-
-def process_image(file_path):
-    """Обрабатывает изображение, находит и выравнивает QR-коды."""
-    # Читаем изображение
-    image = cv2.imread(file_path)
-    if image is None:
-        return None, "Ошибка: не удалось загрузить изображение."
-
-    # Конвертируем в оттенки серого для декодирования
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-    # Находим QR-коды
-    qr_codes = decode(gray)
-    if not qr_codes:
-        return None, "QR-коды не найдены."
-
-    output_files = []
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    # Обрабатываем каждый QR-код
-    for i, qr in enumerate(qr_codes):
-        aligned_qr = align_qr_code(image, qr)
-        if aligned_qr is None:
+        roi = img[y:y+h, x:x+w]
+        if roi.size == 0:
             continue
 
-        # Сохраняем выровненный QR-код
-        output_path = os.path.join(OUTPUT_DIR, f"qr_code_{timestamp}_{i}.jpg")
-        cv2.imwrite(output_path, aligned_qr)
-        output_files.append(output_path)
+        filename = f"datamatrix_{i+1:03d}.jpg"
+        output_path = os.path.join(output_dir, filename)
+        cv2.imwrite(output_path, roi)
+        saved_files.append(filename)
 
-    return output_files, None
+    return saved_files
 
-@app.route('/')
+@app.route('/', methods=['GET', 'POST'])
 def index():
-    """Главная страница с формой загрузки."""
-    return render_template('index.html')
+    if request.method == 'POST':
+        if 'file' not in request.files:
+            flash('Файл не выбран')
+            return redirect(request.url)
 
-@app.route('/upload', methods=['POST'])
-def upload_file():
-    """Обрабатывает загрузку файла и возвращает результаты."""
-    if 'file' not in request.files:
-        return render_template('index.html', error="Файл не выбран.")
-    
-    file = request.files['file']
-    if file.filename == '':
-        return render_template('index.html', error="Файл не выбран.")
+        file = request.files['file']
+        folder_name = request.form.get('folder_name', '').strip()
+        if not folder_name:
+            folder_name = 'default_output'
 
-    if file and file.filename.lower().endswith('.jpg'):
-        # Сохраняем загруженный файл
-        upload_path = os.path.join('uploads', file.filename)
-        if not os.path.exists('uploads'):
-            os.makedirs('uploads')
-        file.save(upload_path)
+        folder_name = sanitize_folder_name(folder_name)
+        if not folder_name:
+            folder_name = 'unnamed_output'
 
-        # Обрабатываем изображение
-        output_files, error = process_image(upload_path)
-        
-        if error:
-            return render_template('index.html', error=error)
-        
-        return render_template('result.html', files=output_files)
-    
-    return render_template('index.html', error="Поддерживаются только файлы JPG.")
+        output_subdir = os.path.join(USER_OUTPUTS, folder_name)
+        os.makedirs(output_subdir, exist_ok=True)
 
-@app.route('/download/<filename>')
-def download_file(filename):
-    """Скачивание обработанного QR-кода."""
-    return send_file(os.path.join(OUTPUT_DIR, filename), as_attachment=True)
+        if file.filename == '':
+            flash('Файл не выбран')
+            return redirect(request.url)
+
+        if file and allowed_file(file.filename):
+            filename = str(uuid.uuid4()) + ".jpg"
+            filepath = os.path.join(UPLOAD_FOLDER, filename)
+            file.save(filepath)
+
+            try:
+                saved_files = extract_datamatrix_regions(filepath, output_subdir)
+                if not saved_files:
+                    flash('DataMatrix-коды не найдены.')
+                    return redirect(request.url)
+                else:
+                    flash(f'Успешно найдено и сохранено {len(saved_files)} DataMatrix-кодов в папку: "{folder_name}"')
+                    return render_template('result.html', 
+                                         files=saved_files, 
+                                         folder_name=folder_name,
+                                         total=len(saved_files))
+            except Exception as e:
+                flash(f'Ошибка обработки: {str(e)}')
+                return redirect(request.url)
+        else:
+            flash('Недопустимый формат файла. Поддерживаемые: JPG, JPEG, PNG.')
+            return redirect(request.url)
+
+    return render_template('upload.html')
+
+@app.route('/download_zip/<folder_name>')
+def download_zip(folder_name):
+    folder_path = os.path.join(USER_OUTPUTS, folder_name)
+    if not os.path.isdir(folder_path):
+        flash('Папка не найдена.')
+        return redirect(url_for('index'))
+
+    # Создаём временный ZIP-архив
+    zip_filename = f"{folder_name}.zip"
+    zip_path = os.path.join(USER_OUTPUTS, zip_filename)
+
+    with ZipFile(zip_path, 'w') as zipf:
+        for root, dirs, files in os.walk(folder_path):
+            for file in files:
+                if file.endswith('.jpg'):
+                    zipf.write(os.path.join(root, file), arcname=file)
+
+    return send_file(zip_path, as_attachment=True)
+
+@app.route('/outputs/<folder_name>/<filename>')
+def download_file(folder_name, filename):
+    folder_path = os.path.join(USER_OUTPUTS, folder_name)
+    return send_from_directory(folder_path, filename)
 
 if __name__ == '__main__':
     app.run(debug=True)

@@ -1,17 +1,42 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <title>Результаты обработки</title>
+    <title>Результат обработки</title>
+    <style>
+        body { font-family: Arial; max-width: 800px; margin: 30px auto; padding: 20px; }
+        h1 { color: #27ae60; }
+        .actions { margin: 20px 0; }
+        .btn {
+            display: inline-block;
+            background: #2980b9;
+            color: white;
+            padding: 10px 20px;
+            text-decoration: none;
+            border-radius: 5px;
+            margin-right: 10px;
+        }
+        .btn.zip { background: #27ae60; }
+        .btn:hover { opacity: 0.9; }
+        ul { list-style-type: none; padding: 0; }
+        li { margin: 8px 0; }
+        a { color: #2980b9; }
+    </style>
 </head>
 <body>
-    <h1>Найденные и выровненные QR-коды</h1>
-    <p>Обнаружено {{ files|length }} QR-кодов:</p>
+    <h1>✅ Обработка завершена!</h1>
+    <p>Найдено и сохранено <strong>{{ total }}</strong> DataMatrix-кодов в папку: <code>{{ folder_name }}</code></p>
+
+    <div class="actions">
+        <a href="{{ url_for('download_zip', folder_name=folder_name) }}" class="btn zip">📦 Скачать всё как ZIP</a>
+        <a href="{{ url_for('index') }}" class="btn">← Новая загрузка</a>
+    </div>
+
+    <h2>Отдельные файлы:</h2>
     <ul>
-        {% for file in files %}
-            <li><a href="/download/{{ file|basename }}" download>{{ file|basename }}</a></li>
-        {% endfor %}
+    {% for f in files %}
+        <li><a href="{{ url_for('download_file', folder_name=folder_name, filename=f) }}" target="_blank">{{ f }}</a></li>
+    {% endfor %}
     </ul>
-    <a href="/">Загрузить другое изображение</a>
 </body>
 </html>
