@@ -3,3 +3,4 @@ opencv-python
 pylibdmtx
 pillow
 numpy
+gunicorn
