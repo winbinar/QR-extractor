@@ -2,6 +2,7 @@ import os
 import requests
 import json
 import io
+import cv2
 import numpy as np
 import uuid
 from flask import Flask, request, render_template, redirect, url_for, flash, send_from_directory, send_file
