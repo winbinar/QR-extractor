@@ -8,6 +8,8 @@ from zipfile import ZipFile
 app = Flask(__name__)
 app.secret_key = 'your_secret_key_here'
 
+HF_API_TOKEN = os.getenv("HF_API_TOKEN", "hf_...")
+
 UPLOAD_FOLDER = 'uploads'
 USER_OUTPUTS = 'user_outputs'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -21,9 +23,9 @@ def extract_all_codes(image_path, output_dir):
     if img is None:
         raise ValueError("Не удалось загрузить изображение")
 
-    all_results = []  # [(points, type_name), ...]
+    all_regions = []  # [(points, type_name), ...]
 
-    # === 1. Используем BarcodeDetector (поддерживает QR, DataMatrix, линейные штрихкоды) ===
+    # === 1. OpenCV BarcodeDetector — для DataMatrix и линейных штрихкодов ===
     try:
         detector = cv2.barcode_BarcodeDetector()
         result = detector.detectAndDecode(img)
@@ -42,55 +44,65 @@ def extract_all_codes(image_path, output_dir):
                 if pts is None or len(pts) < 2:
                     continue
 
-                # Определяем тип
-                code_type = "barcode"  # по умолчанию — линейный
+                code_type = "barcode"
                 if decoded_type is not None and i < len(decoded_type):
                     t = decoded_type[i]
                     if t == 16:
                         code_type = "datamatrix"
                     elif t in (1, 2, 3, 4):  # QR
                         code_type = "qr"
-                    # Иначе — остаётся "barcode"
                 else:
-                    # Эвристика: если 4 угла → 2D-код (QR или DataMatrix), иначе — линейный
                     if len(pts) == 4:
-                        code_type = "qr_or_datamatrix"  # уточним позже
-                    else:
-                        code_type = "barcode"
+                        code_type = "qr_or_datamatrix"
 
-                all_results.append((pts, code_type))
+                all_regions.append((pts, code_type))
     except Exception as e:
-        print(f"BarcodeDetector error: {e}")
-        pass  # продолжаем, попробуем другие методы
-
-    # === 2. Дополнительно: QRCodeDetector (на случай, если BarcodeDetector пропустил) ===
-    try:
-        qr_detector = cv2.QRCodeDetector()
-        data, points, _ = qr_detector.detectAndDecode(img)
-        if data and points is not None and len(points) == 4:
-            # Проверим, не добавлен ли уже
-            already_found = any(
-                len(pts) == 4 and np.allclose(pts, points.reshape(4, 2), atol=10)
-                for pts, _ in all_results
-            )
-            if not already_found:
-                all_results.append((points.reshape(4, 2), "qr"))
-    except Exception as e:
-        print(f"QRCodeDetector fallback error: {e}")
+        print(f"[OpenCV] BarcodeDetector error: {e}")
         pass
+
+    # === 2. Hugging Face API — для сложных QR-кодов ===
+    try:
+        with open(image_path, "rb") as f:
+            image_data = f.read()
+
+        headers = {
+            "Authorization": f"Bearer {HF_API_TOKEN}",
+            "Content-Type": "image/jpeg"
+        }
+
+        response = requests.post(
+            f"https://api-inference.huggingface.co/models/{MODEL_QR}",
+            headers=headers,
+            data=image_data
+        )
+
+        if response.status_code != 200:
+            print(f"[HF] API error: {response.text}")
+        else:
+            results = response.json()
+            for r in results:
+                if r["score"] > 0.5:
+                    box = r["box"]
+                    x1, y1, x2, y2 = box["xmin"], box["ymin"], box["xmax"], box["ymax"]
+                    # Создаём 4 точки прямоугольника
+                    pts = np.array([
+                        [x1, y1],
+                        [x2, y1],
+                        [x2, y2],
+                        [x1, y2]
+                    ], dtype=np.float32)
+                    all_regions.append((pts, "qr_hf"))  # hf = Hugging Face
+
+    except Exception as e:
+        print(f"[HF] Detection error: {e}")
 
     saved_files = []
 
-    for idx, (pts, code_type) in enumerate(all_results):
+    for idx, (pts, code_type) in enumerate(all_regions):
         pts = np.array(pts, dtype=np.float32)
 
         # === Обработка 2D-кодов (4 угла) ===
         if len(pts) == 4:
-            # Уточняем тип: если неизвестен — оставляем как есть
-            if code_type == "qr_or_datamatrix":
-                code_type = "code2d"  # нейтральное имя
-
-            # Перспективное выравнивание
             def dist(a, b):
                 return np.linalg.norm(np.array(a) - np.array(b))
 
@@ -110,31 +122,26 @@ def extract_all_codes(image_path, output_dir):
             except cv2.error:
                 continue
 
-        # === Обработка линейных штрихкодов (2 точки — начало и конец) ===
+        # === Обработка линейных штрихкодов (2 точки) ===
         elif len(pts) >= 2:
-            # Берём первую и последнюю точку
             p1, p2 = pts[0], pts[-1]
             length = int(np.linalg.norm(np.array(p1) - np.array(p2)))
             if length < 20:
                 continue
 
-            # Создаём прямоугольник вокруг линии (ширина = длина, высота = 50)
             w, h = length, 50
             angle = np.arctan2(p2[1] - p1[1], p2[0] - p1[0]) * 180 / np.pi
 
-            # Поворачиваем изображение, чтобы выровнять штрихкод
             center = ((p1[0] + p2[0]) // 2, (p1[1] + p2[1]) // 2)
             M_rot = cv2.getRotationMatrix2D(center, angle, 1.0)
             rotated = cv2.warpAffine(img, M_rot, (img.shape[1], img.shape[0]))
 
-            # Обрезаем регион
             x1 = int(center[0] - w // 2)
             y1 = int(center[1] - h // 2)
             x2 = x1 + w
             y2 = y1 + h
 
             if x1 < 0 or y1 < 0 or x2 > rotated.shape[1] or y2 > rotated.shape[0]:
-                # Если выходит за границы — пропускаем
                 continue
 
             warped = rotated[y1:y2, x1:x2]
@@ -142,7 +149,6 @@ def extract_all_codes(image_path, output_dir):
         else:
             continue
 
-        # Сохраняем
         filename = f"{code_type}_{idx+1:03d}.jpg"
         out_path = os.path.join(output_dir, filename)
         cv2.imwrite(out_path, warped)
