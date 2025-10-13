@@ -1,5 +1,7 @@
-import os
-import cv2
+import requests
+import json
+from PIL import Image
+import io
 import numpy as np
 import uuid
 from flask import Flask, request, render_template, redirect, url_for, flash, send_from_directory, send_file
