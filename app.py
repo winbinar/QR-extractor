@@ -4,7 +4,6 @@ import uuid
 import shutil
 from zipfile import ZipFile
 from flask import Flask, request, render_template, redirect, url_for, flash, send_from_directory, send_file
-from pylibdmtx import pylibdmtx
 
 app = Flask(__name__)
 app.secret_key = 'your_secret_key_here'
@@ -28,24 +27,59 @@ def extract_datamatrix_regions(image_path, output_dir):
     if img is None:
         raise ValueError("Не удалось загрузить изображение")
 
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    decoded_objects = pylibdmtx.decode(gray, max_count=100)
+    # Создаём детектор штрихкодов (включая DataMatrix)
+    try:
+        detector = cv2.barcode_BarcodeDetector()
+    except AttributeError:
+        raise RuntimeError("Версия OpenCV не поддерживает barcode_BarcodeDetector. Требуется OpenCV >= 4.5.3")
+
+    # Декодируем
+    retval, decoded_info, decoded_type, corners = detector.detectAndDecode(img)
 
     saved_files = []
-    for i, obj in enumerate(decoded_objects):
-        x, y, w, h = obj.rect.left, obj.rect.top, obj.rect.width, obj.rect.height
-        x = max(0, x)
-        y = max(0, y)
-        w = max(1, w)
-        h = max(1, h)
 
-        roi = img[y:y+h, x:x+w]
-        if roi.size == 0:
+    if not retval:
+        return saved_files  # Ничего не найдено
+
+    # corners — массив формата [N, 4, 2]
+    for i in range(len(decoded_info)):
+        # Проверяем, что это именно DataMatrix (тип 16)
+        # Согласно документации OpenCV: DataMatrix = 16
+        if decoded_type[i] != 16:
+            continue  # пропускаем не-DataMatrix
+
+        pts = corners[i].astype(np.float32)  # 4 точки
+
+        # Определяем размер выровненного изображения
+        width = max(
+            np.linalg.norm(pts[0] - pts[1]),
+            np.linalg.norm(pts[2] - pts[3])
+        )
+        height = max(
+            np.linalg.norm(pts[0] - pts[3]),
+            np.linalg.norm(pts[1] - pts[2])
+        )
+        width, height = int(width), int(height)
+
+        if width == 0 or height == 0:
             continue
 
+        # Целевые точки для перспективного преобразования
+        dst_pts = np.array([
+            [0, 0],
+            [width - 1, 0],
+            [width - 1, height - 1],
+            [0, height - 1]
+        ], dtype=np.float32)
+
+        # Вычисляем матрицу преобразования
+        M = cv2.getPerspectiveTransform(pts, dst_pts)
+        warped = cv2.warpPerspective(img, M, (width, height))
+
+        # Сохраняем
         filename = f"datamatrix_{i+1:03d}.jpg"
         output_path = os.path.join(output_dir, filename)
-        cv2.imwrite(output_path, roi)
+        cv2.imwrite(output_path, warped)
         saved_files.append(filename)
 
     return saved_files

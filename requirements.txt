@@ -1,6 +1,5 @@
 Flask==3.0.3
 opencv-python==4.10.0.84
-pylibdmtx==0.1.10
 Pillow==10.3.0
 numpy==1.26.4
 gunicorn
