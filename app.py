@@ -27,44 +27,51 @@ def extract_datamatrix_regions(image_path, output_dir):
     if img is None:
         raise ValueError("Не удалось загрузить изображение")
 
-    # Создаём детектор штрихкодов (включая DataMatrix)
     try:
         detector = cv2.barcode_BarcodeDetector()
     except AttributeError:
-        raise RuntimeError("Версия OpenCV не поддерживает barcode_BarcodeDetector. Требуется OpenCV >= 4.5.3")
+        raise RuntimeError("OpenCV не поддерживает barcode_BarcodeDetector. Требуется >=4.5.3")
 
-    # Декодируем
-    retval, decoded_info, decoded_type, corners = detector.detectAndDecode(img)
+    result = detector.detectAndDecode(img)
+
+    # Обработка разных форматов возврата
+    if len(result) == 4:
+        retval, decoded_info, decoded_type, corners = result
+    elif len(result) == 3:
+        # Нет decoded_type — предполагаем, что всё — DataMatrix или QR
+        retval, decoded_info, corners = result
+        decoded_type = [16] * len(decoded_info)  # 16 = DataMatrix (условно)
+    else:
+        raise ValueError(f"Неожиданный формат ответа от detectAndDecode: {len(result)} элементов")
 
     saved_files = []
 
-    if not retval:
-        return saved_files  # Ничего не найдено
+    if not retval or len(corners) == 0:
+        return saved_files
 
-    # corners — массив формата [N, 4, 2]
     for i in range(len(decoded_info)):
-        # Проверяем, что это именно DataMatrix (тип 16)
-        # Согласно документации OpenCV: DataMatrix = 16
-        if decoded_type[i] != 16:
-            continue  # пропускаем не-DataMatrix
-
-        pts = corners[i].astype(np.float32)  # 4 точки
-
-        # Определяем размер выровненного изображения
-        width = max(
-            np.linalg.norm(pts[0] - pts[1]),
-            np.linalg.norm(pts[2] - pts[3])
-        )
-        height = max(
-            np.linalg.norm(pts[0] - pts[3]),
-            np.linalg.norm(pts[1] - pts[2])
-        )
-        width, height = int(width), int(height)
-
-        if width == 0 or height == 0:
+        pts = corners[i]
+        if pts is None or len(pts) != 4:
             continue
 
-        # Целевые точки для перспективного преобразования
+        pts = np.array(pts, dtype=np.float32)
+
+        # Вычисляем ширину и высоту по углам
+        def dist(p1, p2):
+            return np.linalg.norm(np.array(p1) - np.array(p2))
+
+        width_top = dist(pts[0], pts[1])
+        width_bottom = dist(pts[2], pts[3])
+        width = int(max(width_top, width_bottom))
+
+        height_left = dist(pts[0], pts[3])
+        height_right = dist(pts[1], pts[2])
+        height = int(max(height_left, height_right))
+
+        if width <= 0 or height <= 0:
+            continue
+
+        # Целевые точки
         dst_pts = np.array([
             [0, 0],
             [width - 1, 0],
@@ -72,11 +79,13 @@ def extract_datamatrix_regions(image_path, output_dir):
             [0, height - 1]
         ], dtype=np.float32)
 
-        # Вычисляем матрицу преобразования
-        M = cv2.getPerspectiveTransform(pts, dst_pts)
-        warped = cv2.warpPerspective(img, M, (width, height))
+        # Перспективное преобразование
+        try:
+            M = cv2.getPerspectiveTransform(pts, dst_pts)
+            warped = cv2.warpPerspective(img, M, (width, height))
+        except cv2.error:
+            continue  # пропустить, если ошибка трансформации
 
-        # Сохраняем
         filename = f"datamatrix_{i+1:03d}.jpg"
         output_path = os.path.join(output_dir, filename)
         cv2.imwrite(output_path, warped)
