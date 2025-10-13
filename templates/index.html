@@ -2,16 +2,91 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <title>Обработка QR-кодов</title>
+    <title>Извлечение и выравнивание QR-кодов</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            background-color: #f0f2f5;
+        }
+        #drop-zone {
+            border: 2px dashed #ccc;
+            border-radius: 20px;
+            width: 300px;
+            height: 200px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            color: #aaa;
+            font-size: 1.2em;
+            cursor: pointer;
+            transition: background-color 0.3s, border-color 0.3s;
+        }
+        #drop-zone.dragover {
+            background-color: #e0e0e0;
+            border-color: #333;
+        }
+        .app-description {
+            max-width: 600px;
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+    </style>
 </head>
 <body>
-    <h1>Загрузка изображения с QR-кодами</h1>
-    <form method="post" enctype="multipart/form-data" action="/upload">
-        <input type="file" name="file" accept=".jpg">
-        <input type="submit" value="Загрузить">
+    <div class="app-description">
+        <h1>Распознаватель QR-кодов</h1>
+        <p>Этот инструмент помогает вам находить и извлекать QR-коды из изображений. Просто загрузите файл в формате JPG, и система автоматически найдет, выровняет и предоставит вам отдельные изображения для каждого найденного QR-кода.</p>
+        <p>Вы можете перетащить файл в область ниже или нажать на нее, чтобы выбрать файл.</p>
+    </div>
+
+    <form id="upload-form" method="post" enctype="multipart/form-data" action="/upload">
+        <div id="drop-zone">
+            Перетащите файл сюда или кликните для выбора
+        </div>
+        <input type="file" name="file" id="file-input" accept=".jpg" style="display: none;">
     </form>
+
     {% if error %}
         <p style="color: red;">{{ error }}</p>
     {% endif %}
+
+    <script>
+        const dropZone = document.getElementById('drop-zone');
+        const fileInput = document.getElementById('file-input');
+        const form = document.getElementById('upload-form');
+
+        dropZone.addEventListener('click', () => fileInput.click());
+
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length > 0) {
+                form.submit();
+            }
+        });
+
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('dragover');
+        });
+
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('dragover');
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                fileInput.files = files;
+                form.submit();
+            }
+        });
+    </script>
 </body>
 </html>

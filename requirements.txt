@@ -2,5 +2,4 @@ Flask
 numpy
 pillow
 opencv-python
-pyzbar
 gunicorn
