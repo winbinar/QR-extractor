@@ -3,6 +3,7 @@
 set -o errexit
 
 apt-get update
-apt-get install -y libzbar0
+apt-get install -y libzbar0, zbar
 
 pip install -r requirements.txt
+
