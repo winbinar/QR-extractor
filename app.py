@@ -34,44 +34,45 @@ def extract_datamatrix_regions(image_path, output_dir):
 
     result = detector.detectAndDecode(img)
 
-    # Обработка разных форматов возврата
+    # Поддержка 3 или 4 значений
     if len(result) == 4:
         retval, decoded_info, decoded_type, corners = result
     elif len(result) == 3:
-        # Нет decoded_type — предполагаем, что всё — DataMatrix или QR
         retval, decoded_info, corners = result
-        decoded_type = [16] * len(decoded_info)  # 16 = DataMatrix (условно)
+        decoded_type = None  # не используется
     else:
-        raise ValueError(f"Неожиданный формат ответа от detectAndDecode: {len(result)} элементов")
+        raise ValueError(f"Неожиданное количество возвращаемых значений: {len(result)}")
 
     saved_files = []
 
-    if not retval or len(corners) == 0:
+    # 🔒 Безопасная проверка: corners может быть None!
+    if not retval or corners is None or len(corners) == 0:
         return saved_files
 
-    for i in range(len(decoded_info)):
+    for i in range(len(corners)):
         pts = corners[i]
+        # Пропускаем, если pts — None или не содержит 4 точки
         if pts is None or len(pts) != 4:
             continue
 
-        pts = np.array(pts, dtype=np.float32)
+        try:
+            pts = np.array(pts, dtype=np.float32)
+        except Exception:
+            continue
 
-        # Вычисляем ширину и высоту по углам
+        # Вычисляем размеры
         def dist(p1, p2):
             return np.linalg.norm(np.array(p1) - np.array(p2))
 
-        width_top = dist(pts[0], pts[1])
-        width_bottom = dist(pts[2], pts[3])
-        width = int(max(width_top, width_bottom))
-
-        height_left = dist(pts[0], pts[3])
-        height_right = dist(pts[1], pts[2])
-        height = int(max(height_left, height_right))
-
-        if width <= 0 or height <= 0:
+        try:
+            width = int(max(dist(pts[0], pts[1]), dist(pts[2], pts[3])))
+            height = int(max(dist(pts[0], pts[3]), dist(pts[1], pts[2])))
+        except Exception:
             continue
 
-        # Целевые точки
+        if width <= 5 or height <= 5:  # слишком маленькие — пропускаем
+            continue
+
         dst_pts = np.array([
             [0, 0],
             [width - 1, 0],
@@ -79,12 +80,11 @@ def extract_datamatrix_regions(image_path, output_dir):
             [0, height - 1]
         ], dtype=np.float32)
 
-        # Перспективное преобразование
         try:
             M = cv2.getPerspectiveTransform(pts, dst_pts)
             warped = cv2.warpPerspective(img, M, (width, height))
         except cv2.error:
-            continue  # пропустить, если ошибка трансформации
+            continue
 
         filename = f"datamatrix_{i+1:03d}.jpg"
         output_path = os.path.join(output_dir, filename)
