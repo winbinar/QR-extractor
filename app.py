@@ -43,14 +43,18 @@ def extract_all_codes(image_path, output_dir):
         if decoded_dmtx:
             app.logger.debug(f"Pylibdmtx нашёл {len(decoded_dmtx)} DataMatrix кодов")
             for code in decoded_dmtx:
-                x, y, w, h = code.rect
-                pts = np.array([
-                    [x, y],
-                    [x + w, y],
-                    [x + w, y + h],
-                    [x, y + h]
-                ], dtype=np.float32)
-                all_regions.append((pts, "datamatrix_dmtx"))
+                # Используем code.polygon, который содержит реальные углы кода,
+                # а не просто ограничивающий прямоугольник code.rect
+                if hasattr(code, 'polygon') and len(code.polygon) == 4:
+                    pts = np.array(code.polygon, dtype=np.float32)
+                    all_regions.append((pts, "datamatrix_dmtx"))
+                else:
+                    # Фоллбэк на случай, если polygon недоступен
+                    x, y, w, h = code.rect
+                    pts = np.array([
+                        [x, y], [x + w, y], [x + w, y + h], [x, y + h]
+                    ], dtype=np.float32)
+                    all_regions.append((pts, "datamatrix_dmtx_rect"))
     except Exception as e:
         app.logger.error(f"Pylibdmtx error: {e}")
 
@@ -60,12 +64,11 @@ def extract_all_codes(image_path, output_dir):
         detector = cv2.barcode_BarcodeDetector()
         result = detector.detectAndDecode(img)
 
-        # Восстанавливаем проверку на количество возвращаемых значений
         if len(result) == 4:
             retval, decoded_info, decoded_type, corners = result
         elif len(result) == 3:
             retval, decoded_info, corners = result
-            decoded_type = None # Тип не был возвращен
+            decoded_type = None
         else:
             retval, corners = False, None
 
@@ -139,47 +142,57 @@ def extract_all_codes(image_path, output_dir):
         processed_centers.append(center)
         
         warped = None
-        # === Специальная обработка для pylibdmtx ===
-        if code_type == "datamatrix_dmtx":
-            x, y = int(pts[0][0]), int(pts[0][1])
-            w_rect = int(pts[1][0] - pts[0][0])
-            h_rect = int(pts[2][1] - pts[1][1])
-            if w_rect > 10 and h_rect > 10:
-                # Простое вырезание области (кроп)
-                warped = img[y:y+h_rect, x:x+w_rect]
+        # === Обработка 4-угольных кодов ===
+        if len(pts) == 4:
+            # === Специальная, надежная обработка для pylibdmtx ===
+            if code_type == "datamatrix_dmtx":
+                try:
+                    # Находим min/max координаты, чтобы получить правильный bounding box
+                    x_coords = pts[:, 0]
+                    y_coords = pts[:, 1]
+                    x = int(np.min(x_coords))
+                    y = int(np.min(y_coords))
+                    w_rect = int(np.max(x_coords) - x)
+                    h_rect = int(np.max(y_coords) - y)
+
+                    if w_rect > 10 and h_rect > 10:
+                        # Простое вырезание области (кроп)
+                        warped = img[y:y+h_rect, x:x+w_rect]
+                    else:
+                        app.logger.debug(f"Регион {idx+1} ({code_type}): слишком маленький ({w_rect}x{h_rect}) — пропускаем")
+                        continue
+                except Exception as e:
+                    app.logger.error(f"Ошибка кропа для {code_type} региона {idx+1}: {e}")
+                    continue
+            # === Обработка для всех остальных 4-угольных кодов (с исправлением перспективы) ===
             else:
-                app.logger.debug(f"Регион {idx+1} ({code_type}): слишком маленький ({w_rect}x{h_rect}) — пропускаем")
-                continue
+                try:
+                    rect = np.zeros((4, 2), dtype="float32")
+                    s = pts.sum(axis=1)
+                    rect[0] = pts[np.argmin(s)]
+                    rect[2] = pts[np.argmax(s)]
+                    diff = np.diff(pts, axis=1)
+                    rect[1] = pts[np.argmin(diff)]
+                    rect[3] = pts[np.argmax(diff)]
+                    pts = rect
 
-        # === Обработка для всех остальных 4-угольных кодов ===
-        elif len(pts) == 4:
-            try:
-                rect = np.zeros((4, 2), dtype="float32")
-                s = pts.sum(axis=1)
-                rect[0] = pts[np.argmin(s)]
-                rect[2] = pts[np.argmax(s)]
-                diff = np.diff(pts, axis=1)
-                rect[1] = pts[np.argmin(diff)]
-                rect[3] = pts[np.argmax(diff)]
-                pts = rect
+                    w = int(max(np.linalg.norm(pts[0] - pts[1]), np.linalg.norm(pts[2] - pts[3])))
+                    h = int(max(np.linalg.norm(pts[0] - pts[3]), np.linalg.norm(pts[1] - pts[2])))
+                except Exception as e:
+                    app.logger.error(f"Ошибка при вычислении размеров для региона {idx+1}: {e}")
+                    continue
 
-                w = int(max(np.linalg.norm(pts[0] - pts[1]), np.linalg.norm(pts[2] - pts[3])))
-                h = int(max(np.linalg.norm(pts[0] - pts[3]), np.linalg.norm(pts[1] - pts[2])))
-            except Exception as e:
-                app.logger.error(f"Ошибка при вычислении размеров для региона {idx+1}: {e}")
-                continue
+                if w < 10 or h < 10:
+                    app.logger.debug(f"Регион {idx+1}: слишком маленький ({w}x{h}) — пропускаем")
+                    continue
 
-            if w < 10 or h < 10:
-                app.logger.debug(f"Регион {idx+1}: слишком маленький ({w}x{h}) — пропускаем")
-                continue
-
-            dst = np.array([[0,0], [w-1,0], [w-1,h-1], [0,h-1]], dtype=np.float32)
-            try:
-                M = cv2.getPerspectiveTransform(pts, dst)
-                warped = cv2.warpPerspective(img, M, (w, h))
-            except cv2.error as e:
-                app.logger.error(f"Ошибка перспективного преобразования для региона {idx+1}: {e}")
-                continue
+                dst = np.array([[0,0], [w-1,0], [w-1,h-1], [0,h-1]], dtype=np.float32)
+                try:
+                    M = cv2.getPerspectiveTransform(pts, dst)
+                    warped = cv2.warpPerspective(img, M, (w, h))
+                except cv2.error as e:
+                    app.logger.error(f"Ошибка перспективного преобразования для региона {idx+1}: {e}")
+                    continue
         else:
             app.logger.debug(f"Регион {idx+1} ({code_type}): не 4-угольный, пропускаем")
             continue
