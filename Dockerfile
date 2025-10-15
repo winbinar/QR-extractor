@@ -2,7 +2,7 @@
 FROM python:3.9-slim
 
 # Устанавливаем системные зависимости для OpenCV
-RUN apt-get update && apt-get install -y libgl1 libglib2.0-0 libsm6 libxext6 libxrender-dev
+RUN apt-get update && apt-get install -y libgl1 libglib2.0-0 libsm6 libxext6 libxrender-dev libdmtx0b
 
 # Устанавливаем рабочую директорию в контейнере
 WORKDIR /app

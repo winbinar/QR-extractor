@@ -2,11 +2,22 @@ import os
 import cv2
 import numpy as np
 import uuid
+import logging
 from flask import Flask, request, render_template, redirect, url_for, flash, send_from_directory, send_file
 from zipfile import ZipFile
+from pylibdmtx.pylibdmtx import decode as dmtx_decode
 
 app = Flask(__name__)
 app.secret_key = 'your_secret_key_here'
+
+# Настройка логирования
+logging.basicConfig(level=logging.DEBUG)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler = logging.StreamHandler()
+handler.setFormatter(formatter)
+app.logger.addHandler(handler)
+app.logger.setLevel(logging.DEBUG)
+
 
 UPLOAD_FOLDER = 'uploads'
 USER_OUTPUTS = 'user_outputs'
@@ -17,132 +28,149 @@ def sanitize_folder_name(name):
     return ''.join(c for c in name if c.isalnum() or c in ('_', '-', ' ')).strip().replace(' ', '_')[:50] or 'output'
 
 def extract_all_codes(image_path, output_dir):
-    print(f"[DEBUG] Загружаем изображение: {image_path}")
+    app.logger.debug(f"Загружаем изображение: {image_path}")
     img = cv2.imread(image_path)
     if img is None:
         raise ValueError("Не удалось загрузить изображение")
 
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-
+    
     all_regions = []
 
-    # === 1. OpenCV BarcodeDetector — для DataMatrix и линейных штрихкодов ===
+    # === 1. Pylibdmtx — для DataMatrix ===
+    try:
+        decoded_dmtx = dmtx_decode(gray)
+        if decoded_dmtx:
+            app.logger.debug(f"Pylibdmtx нашёл {len(decoded_dmtx)} DataMatrix кодов")
+            for code in decoded_dmtx:
+                x, y, w, h = code.rect
+                pts = np.array([
+                    [x, y],
+                    [x + w, y],
+                    [x + w, y + h],
+                    [x, y + h]
+                ], dtype=np.float32)
+                all_regions.append((pts, "datamatrix_dmtx"))
+    except Exception as e:
+        app.logger.error(f"Pylibdmtx error: {e}")
+
+
+    # === 2. OpenCV BarcodeDetector — для DataMatrix и линейных штрихкодов ===
     try:
         detector = cv2.barcode_BarcodeDetector()
         result = detector.detectAndDecode(img)
 
+        # Восстанавливаем проверку на количество возвращаемых значений
         if len(result) == 4:
             retval, decoded_info, decoded_type, corners = result
         elif len(result) == 3:
             retval, decoded_info, corners = result
-            decoded_type = None
+            decoded_type = None # Тип не был возвращен
         else:
             retval, corners = False, None
 
         if retval and corners is not None:
-            print(f"[DEBUG] OpenCV BarcodeDetector нашёл {len(corners)} кодов")
+            app.logger.debug(f"OpenCV BarcodeDetector нашёл {len(corners)} кодов")
             for i in range(len(corners)):
                 pts = corners[i]
                 if pts is None or len(pts) < 2:
-                    print(f"[DEBUG] Пропускаем код {i+1}: pts is None или меньше 2 точек")
+                    app.logger.debug(f"Пропускаем код {i+1}: pts is None или меньше 2 точек")
                     continue
 
                 code_type = "barcode"
-                if decoded_type is not None and i < len(decoded_type):
+                if decoded_type is not None and i < len(decoded_type) and decoded_type[i]:
                     t = decoded_type[i]
-                    if t == 16:
-                        code_type = "datamatrix"
-                    elif t in (1, 2, 3, 4):  # QR
-                        code_type = "qr"
-                else:
-                    if len(pts) == 4:
-                        code_type = "qr_or_datamatrix"
+                    code_type = f"opencv_type_{t}"
 
-                print(f"[DEBUG] Найден {code_type} с {len(pts)} точками")
+                app.logger.debug(f"Найден {code_type} с {len(pts)} точками")
                 all_regions.append((pts, code_type))
         else:
-            print("[DEBUG] OpenCV BarcodeDetector не нашёл кодов")
+            app.logger.debug("OpenCV BarcodeDetector не нашёл кодов")
     except Exception as e:
-        print(f"[ERROR] OpenCV BarcodeDetector error: {e}")
+        app.logger.error(f"OpenCV BarcodeDetector error: {e}")
 
-    # === 2. Контурный поиск — для QR-кодов любого размера ===
+    # === 3. Контурный поиск — для QR-кодов и других прямоугольных кодов ===
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     contours, _ = cv2.findContours(thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    print(f"[DEBUG] Найдено {len(contours)} контуров")
+    app.logger.debug(f"Найдено {len(contours)} контуров")
 
     for i, cnt in enumerate(contours):
         area = cv2.contourArea(cnt)
-        if area < 50:
-            # print(f"[DEBUG] Контур {i+1}: площадь {area} < 50 — пропускаем")
+        if area < 100:
             continue
 
         epsilon = 0.02 * cv2.arcLength(cnt, True)
         approx = cv2.approxPolyDP(cnt, epsilon, True)
 
-        # Если 4 точки — возможно, QR-код или DataMatrix
         if len(approx) == 4:
             pts = approx.reshape(4, 2)
             rect = cv2.boundingRect(approx)
             w, h = rect[2], rect[3]
-            aspect_ratio = max(w, h) / min(w, h)
-            if aspect_ratio > 5:
-                # print(f"[DEBUG] Контур {i+1}: слишком вытянутый (aspect_ratio={aspect_ratio}) — пропускаем")
-                continue
+            aspect_ratio = max(w, h) / min(w, h) if min(w, h) > 0 else 0
+            
+            if 0.8 < aspect_ratio < 1.2:
+                is_duplicate = False
+                for existing_pts, _ in all_regions:
+                    if np.linalg.norm(np.mean(existing_pts, axis=0) - np.mean(pts, axis=0)) < 10:
+                        is_duplicate = True
+                        break
+                if not is_duplicate:
+                    app.logger.debug(f"Контур {i+1}: найден 4-угольник, площадь={area}, размер={w}x{h}")
+                    all_regions.append((pts, "qr_contour"))
 
-            # Проверяем, что это не просто случайный прямоугольник
-            # Можно добавить проверку на угловые маркеры, но для простоты — пропускаем
-            print(f"[DEBUG] Контур {i+1}: найден 4-угольник, площадь={area}, размер={w}x{h}")
-            all_regions.append((pts, "qr_contour"))
-
-        # Если 2 точки — возможно, линейный штрихкод
-        elif len(approx) == 2:
-            # Это редко работает — пропускаем
-            pass
-
-    # === 3. Дополнительный поиск линейных штрихкодов — через узкие прямоугольники ===
-    for i, cnt in enumerate(contours):
-        area = cv2.contourArea(cnt)
-        if area < 100 or area > 10000:
-            # print(f"[DEBUG] Контур {i+1}: площадь {area} вне диапазона — пропускаем")
-            continue
-
-        rect = cv2.boundingRect(cnt)
-        x, y, w, h = rect
-        aspect_ratio = max(w, h) / min(w, h)
-        if aspect_ratio < 3:  # не слишком вытянутый — не штрихкод
-            continue
-
-        # Создаём 4 точки прямоугольника
-        pts = np.array([
-            [x, y],
-            [x + w, y],
-            [x + w, y + h],
-            [x, y + h]
-        ], dtype=np.float32)
-        print(f"[DEBUG] Контур {i+1}: найден узкий прямоугольник (ширина={w}, высота={h}, aspect_ratio={aspect_ratio})")
-        all_regions.append((pts, "barcode_contour"))
-
-    print(f"[INFO] Всего найдено {len(all_regions)} регионов для обработки")
+    app.logger.info(f"Всего найдено {len(all_regions)} уникальных регионов для обработки")
 
     saved_files = []
+    processed_centers = []
 
     for idx, (pts, code_type) in enumerate(all_regions):
         pts = np.array(pts, dtype=np.float32)
 
-        # === Обработка 2D-кодов (4 угла) ===
-        if len(pts) == 4:
-            def dist(a, b):
-                return np.linalg.norm(np.array(a) - np.array(b))
+        center = np.mean(pts, axis=0)
+        is_duplicate = False
+        for proc_center in processed_centers:
+            if np.linalg.norm(center - proc_center) < 15:
+                is_duplicate = True
+                app.logger.debug(f"Регион {idx+1} ({code_type}) пропущен как дубликат")
+                break
+        if is_duplicate:
+            continue
+        
+        processed_centers.append(center)
+        
+        warped = None
+        # === Специальная обработка для pylibdmtx ===
+        if code_type == "datamatrix_dmtx":
+            x, y = int(pts[0][0]), int(pts[0][1])
+            w_rect = int(pts[1][0] - pts[0][0])
+            h_rect = int(pts[2][1] - pts[1][1])
+            if w_rect > 10 and h_rect > 10:
+                # Простое вырезание области (кроп)
+                warped = img[y:y+h_rect, x:x+w_rect]
+            else:
+                app.logger.debug(f"Регион {idx+1} ({code_type}): слишком маленький ({w_rect}x{h_rect}) — пропускаем")
+                continue
 
+        # === Обработка для всех остальных 4-угольных кодов ===
+        elif len(pts) == 4:
             try:
-                w = int(max(dist(pts[0], pts[1]), dist(pts[2], pts[3])))
-                h = int(max(dist(pts[0], pts[3]), dist(pts[1], pts[2])))
+                rect = np.zeros((4, 2), dtype="float32")
+                s = pts.sum(axis=1)
+                rect[0] = pts[np.argmin(s)]
+                rect[2] = pts[np.argmax(s)]
+                diff = np.diff(pts, axis=1)
+                rect[1] = pts[np.argmin(diff)]
+                rect[3] = pts[np.argmax(diff)]
+                pts = rect
+
+                w = int(max(np.linalg.norm(pts[0] - pts[1]), np.linalg.norm(pts[2] - pts[3])))
+                h = int(max(np.linalg.norm(pts[0] - pts[3]), np.linalg.norm(pts[1] - pts[2])))
             except Exception as e:
-                print(f"[ERROR] Ошибка при вычислении размеров для региона {idx+1}: {e}")
+                app.logger.error(f"Ошибка при вычислении размеров для региона {idx+1}: {e}")
                 continue
 
             if w < 10 or h < 10:
-                print(f"[DEBUG] Регион {idx+1}: слишком маленький ({w}x{h}) — пропускаем")
+                app.logger.debug(f"Регион {idx+1}: слишком маленький ({w}x{h}) — пропускаем")
                 continue
 
             dst = np.array([[0,0], [w-1,0], [w-1,h-1], [0,h-1]], dtype=np.float32)
@@ -150,47 +178,24 @@ def extract_all_codes(image_path, output_dir):
                 M = cv2.getPerspectiveTransform(pts, dst)
                 warped = cv2.warpPerspective(img, M, (w, h))
             except cv2.error as e:
-                print(f"[ERROR] Ошибка перспективного преобразования для региона {idx+1}: {e}")
+                app.logger.error(f"Ошибка перспективного преобразования для региона {idx+1}: {e}")
                 continue
-
-        # === Обработка линейных штрихкодов (2 точки) ===
-        elif len(pts) >= 2:
-            p1, p2 = pts[0], pts[-1]
-            length = int(np.linalg.norm(np.array(p1) - np.array(p2)))
-            if length < 20:
-                print(f"[DEBUG] Регион {idx+1}: длина {length} < 20 — пропускаем")
-                continue
-
-            w, h = length, 50
-            angle = np.arctan2(p2[1] - p1[1], p2[0] - p1[0]) * 180 / np.pi
-
-            center = ((p1[0] + p2[0]) // 2, (p1[1] + p2[1]) // 2)
-            M_rot = cv2.getRotationMatrix2D(center, angle, 1.0)
-            rotated = cv2.warpAffine(img, M_rot, (img.shape[1], img.shape[0]))
-
-            x1 = int(center[0] - w // 2)
-            y1 = int(center[1] - h // 2)
-            x2 = x1 + w
-            y2 = y1 + h
-
-            if x1 < 0 or y1 < 0 or x2 > rotated.shape[1] or y2 > rotated.shape[0]:
-                print(f"[DEBUG] Регион {idx+1}: выходит за границы — пропускаем")
-                continue
-
-            warped = rotated[y1:y2, x1:x2]
-
         else:
-            print(f"[DEBUG] Регион {idx+1}: неподдерживаемое количество точек — пропускаем")
+            app.logger.debug(f"Регион {idx+1} ({code_type}): не 4-угольный, пропускаем")
+            continue
+
+        if warped is None:
+            app.logger.debug(f"Регион {idx+1} ({code_type}): не удалось извлечь изображение — пропускаем")
             continue
 
         filename = f"{code_type}_{idx+1:03d}.jpg"
         out_path = os.path.join(output_dir, filename)
         try:
             cv2.imwrite(out_path, warped)
-            print(f"[SUCCESS] Сохранён файл: {filename}")
+            app.logger.info(f"Сохранён файл: {filename}")
             saved_files.append(filename)
         except Exception as e:
-            print(f"[ERROR] Ошибка сохранения файла {filename}: {e}")
+            app.logger.error(f"Ошибка сохранения файла {filename}: {e}")
 
     return saved_files
 
@@ -229,6 +234,7 @@ def index():
             flash(f'Найдено и сохранено {len(saved_files)} кодов в папку: "{folder_name}"')
             return render_template('result.html', files=saved_files, folder_name=folder_name, total=len(saved_files))
         except Exception as e:
+            app.logger.error(f"Ошибка обработки: {e}", exc_info=True)
             flash(f'Ошибка обработки: {str(e)}')
             return redirect(request.url)
 
@@ -254,4 +260,4 @@ def download_file(folder_name, filename):
     return send_from_directory(os.path.join(USER_OUTPUTS, folder_name), filename)
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, host='0.0.0.0', port=5001)
