@@ -1,7 +1,4 @@
 import os
-import requests
-import json
-import io
 import cv2
 import numpy as np
 import uuid
@@ -10,8 +7,6 @@ from zipfile import ZipFile
 
 app = Flask(__name__)
 app.secret_key = 'your_secret_key_here'
-
-HF_API_TOKEN = os.getenv("HF_API_TOKEN", "hf_...")
 
 UPLOAD_FOLDER = 'uploads'
 USER_OUTPUTS = 'user_outputs'
@@ -26,7 +21,10 @@ def extract_all_codes(image_path, output_dir):
     if img is None:
         raise ValueError("Не удалось загрузить изображение")
 
-    all_regions = []  # [(points, type_name), ...]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    all_regions = []
 
     # === 1. OpenCV BarcodeDetector — для DataMatrix и линейных штрихкодов ===
     try:
@@ -63,41 +61,50 @@ def extract_all_codes(image_path, output_dir):
         print(f"[OpenCV] BarcodeDetector error: {e}")
         pass
 
-    # === 2. Hugging Face API — для сложных QR-кодов ===
-    try:
-        with open(image_path, "rb") as f:
-            image_data = f.read()
+    # === 2. Контурный поиск — для QR-кодов любого размера ===
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        headers = {
-            "Authorization": f"Bearer {HF_API_TOKEN}",
-            "Content-Type": "image/jpeg"
-        }
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < 50:  # слишком маленькие — пропускаем
+            continue
 
-        response = requests.post(
-            f"https://api-inference.huggingface.co/models/{MODEL_QR}",
-            headers=headers,
-            data=image_data
-        )
+        epsilon = 0.02 * cv2.arcLength(cnt, True)
+        approx = cv2.approxPolyDP(cnt, epsilon, True)
 
-        if response.status_code != 200:
-            print(f"[HF] API error: {response.text}")
-        else:
-            results = response.json()
-            for r in results:
-                if r["score"] > 0.5:
-                    box = r["box"]
-                    x1, y1, x2, y2 = box["xmin"], box["ymin"], box["xmax"], box["ymax"]
-                    # Создаём 4 точки прямоугольника
-                    pts = np.array([
-                        [x1, y1],
-                        [x2, y1],
-                        [x2, y2],
-                        [x1, y2]
-                    ], dtype=np.float32)
-                    all_regions.append((pts, "qr_hf"))  # hf = Hugging Face
+        # Если 4 точки — возможно, QR-код или DataMatrix
+        if len(approx) == 4:
+            pts = approx.reshape(4, 2)
+            # Проверяем соотношение сторон (не слишком вытянутый)
+            rect = cv2.boundingRect(approx)
+            w, h = rect[2], rect[3]
+            aspect_ratio = max(w, h) / min(w, h)
+            if aspect_ratio < 5:  # не слишком вытянутый — подходит для QR/DataMatrix
+                all_regions.append((pts, "qr_contour"))
 
-    except Exception as e:
-        print(f"[HF] Detection error: {e}")
+        # Если 2 точки — возможно, линейный штрихкод (узкий прямоугольник)
+        elif len(approx) == 2:
+            # Это редкий случай — обычно не работает
+            pass
+
+    # === 3. Дополнительный поиск линейных штрихкодов — через узкие прямоугольники ===
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < 100 or area > 10000:  # фильтр по размеру
+            continue
+
+        rect = cv2.boundingRect(cnt)
+        x, y, w, h = rect
+        aspect_ratio = max(w, h) / min(w, h)
+        if aspect_ratio > 5:  # очень вытянутый — возможно, штрихкод
+            # Создаём 4 точки прямоугольника
+            pts = np.array([
+                [x, y],
+                [x + w, y],
+                [x + w, y + h],
+                [x, y + h]
+            ], dtype=np.float32)
+            all_regions.append((pts, "barcode_contour"))
 
     saved_files = []
 
