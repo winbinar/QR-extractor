@@ -17,6 +17,7 @@ def sanitize_folder_name(name):
     return ''.join(c for c in name if c.isalnum() or c in ('_', '-', ' ')).strip().replace(' ', '_')[:50] or 'output'
 
 def extract_all_codes(image_path, output_dir):
+    print(f"[DEBUG] Загружаем изображение: {image_path}")
     img = cv2.imread(image_path)
     if img is None:
         raise ValueError("Не удалось загрузить изображение")
@@ -40,9 +41,11 @@ def extract_all_codes(image_path, output_dir):
             retval, corners = False, None
 
         if retval and corners is not None:
+            print(f"[DEBUG] OpenCV BarcodeDetector нашёл {len(corners)} кодов")
             for i in range(len(corners)):
                 pts = corners[i]
                 if pts is None or len(pts) < 2:
+                    print(f"[DEBUG] Пропускаем код {i+1}: pts is None или меньше 2 точек")
                     continue
 
                 code_type = "barcode"
@@ -56,17 +59,21 @@ def extract_all_codes(image_path, output_dir):
                     if len(pts) == 4:
                         code_type = "qr_or_datamatrix"
 
+                print(f"[DEBUG] Найден {code_type} с {len(pts)} точками")
                 all_regions.append((pts, code_type))
+        else:
+            print("[DEBUG] OpenCV BarcodeDetector не нашёл кодов")
     except Exception as e:
-        print(f"[OpenCV] BarcodeDetector error: {e}")
-        pass
+        print(f"[ERROR] OpenCV BarcodeDetector error: {e}")
 
     # === 2. Контурный поиск — для QR-кодов любого размера ===
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    print(f"[DEBUG] Найдено {len(contours)} контуров")
 
-    for cnt in contours:
+    for i, cnt in enumerate(contours):
         area = cv2.contourArea(cnt)
-        if area < 50:  # слишком маленькие — пропускаем
+        if area < 50:
+            # print(f"[DEBUG] Контур {i+1}: площадь {area} < 50 — пропускаем")
             continue
 
         epsilon = 0.02 * cv2.arcLength(cnt, True)
@@ -75,36 +82,47 @@ def extract_all_codes(image_path, output_dir):
         # Если 4 точки — возможно, QR-код или DataMatrix
         if len(approx) == 4:
             pts = approx.reshape(4, 2)
-            # Проверяем соотношение сторон (не слишком вытянутый)
             rect = cv2.boundingRect(approx)
             w, h = rect[2], rect[3]
             aspect_ratio = max(w, h) / min(w, h)
-            if aspect_ratio < 5:  # не слишком вытянутый — подходит для QR/DataMatrix
-                all_regions.append((pts, "qr_contour"))
+            if aspect_ratio > 5:
+                # print(f"[DEBUG] Контур {i+1}: слишком вытянутый (aspect_ratio={aspect_ratio}) — пропускаем")
+                continue
 
-        # Если 2 точки — возможно, линейный штрихкод (узкий прямоугольник)
+            # Проверяем, что это не просто случайный прямоугольник
+            # Можно добавить проверку на угловые маркеры, но для простоты — пропускаем
+            print(f"[DEBUG] Контур {i+1}: найден 4-угольник, площадь={area}, размер={w}x{h}")
+            all_regions.append((pts, "qr_contour"))
+
+        # Если 2 точки — возможно, линейный штрихкод
         elif len(approx) == 2:
-            # Это редкий случай — обычно не работает
+            # Это редко работает — пропускаем
             pass
 
     # === 3. Дополнительный поиск линейных штрихкодов — через узкие прямоугольники ===
-    for cnt in contours:
+    for i, cnt in enumerate(contours):
         area = cv2.contourArea(cnt)
-        if area < 100 or area > 10000:  # фильтр по размеру
+        if area < 100 or area > 10000:
+            # print(f"[DEBUG] Контур {i+1}: площадь {area} вне диапазона — пропускаем")
             continue
 
         rect = cv2.boundingRect(cnt)
         x, y, w, h = rect
         aspect_ratio = max(w, h) / min(w, h)
-        if aspect_ratio > 5:  # очень вытянутый — возможно, штрихкод
-            # Создаём 4 точки прямоугольника
-            pts = np.array([
-                [x, y],
-                [x + w, y],
-                [x + w, y + h],
-                [x, y + h]
-            ], dtype=np.float32)
-            all_regions.append((pts, "barcode_contour"))
+        if aspect_ratio < 3:  # не слишком вытянутый — не штрихкод
+            continue
+
+        # Создаём 4 точки прямоугольника
+        pts = np.array([
+            [x, y],
+            [x + w, y],
+            [x + w, y + h],
+            [x, y + h]
+        ], dtype=np.float32)
+        print(f"[DEBUG] Контур {i+1}: найден узкий прямоугольник (ширина={w}, высота={h}, aspect_ratio={aspect_ratio})")
+        all_regions.append((pts, "barcode_contour"))
+
+    print(f"[INFO] Всего найдено {len(all_regions)} регионов для обработки")
 
     saved_files = []
 
@@ -119,17 +137,20 @@ def extract_all_codes(image_path, output_dir):
             try:
                 w = int(max(dist(pts[0], pts[1]), dist(pts[2], pts[3])))
                 h = int(max(dist(pts[0], pts[3]), dist(pts[1], pts[2])))
-            except:
+            except Exception as e:
+                print(f"[ERROR] Ошибка при вычислении размеров для региона {idx+1}: {e}")
                 continue
 
             if w < 10 or h < 10:
+                print(f"[DEBUG] Регион {idx+1}: слишком маленький ({w}x{h}) — пропускаем")
                 continue
 
             dst = np.array([[0,0], [w-1,0], [w-1,h-1], [0,h-1]], dtype=np.float32)
             try:
                 M = cv2.getPerspectiveTransform(pts, dst)
                 warped = cv2.warpPerspective(img, M, (w, h))
-            except cv2.error:
+            except cv2.error as e:
+                print(f"[ERROR] Ошибка перспективного преобразования для региона {idx+1}: {e}")
                 continue
 
         # === Обработка линейных штрихкодов (2 точки) ===
@@ -137,6 +158,7 @@ def extract_all_codes(image_path, output_dir):
             p1, p2 = pts[0], pts[-1]
             length = int(np.linalg.norm(np.array(p1) - np.array(p2)))
             if length < 20:
+                print(f"[DEBUG] Регион {idx+1}: длина {length} < 20 — пропускаем")
                 continue
 
             w, h = length, 50
@@ -152,17 +174,23 @@ def extract_all_codes(image_path, output_dir):
             y2 = y1 + h
 
             if x1 < 0 or y1 < 0 or x2 > rotated.shape[1] or y2 > rotated.shape[0]:
+                print(f"[DEBUG] Регион {idx+1}: выходит за границы — пропускаем")
                 continue
 
             warped = rotated[y1:y2, x1:x2]
 
         else:
+            print(f"[DEBUG] Регион {idx+1}: неподдерживаемое количество точек — пропускаем")
             continue
 
         filename = f"{code_type}_{idx+1:03d}.jpg"
         out_path = os.path.join(output_dir, filename)
-        cv2.imwrite(out_path, warped)
-        saved_files.append(filename)
+        try:
+            cv2.imwrite(out_path, warped)
+            print(f"[SUCCESS] Сохранён файл: {filename}")
+            saved_files.append(filename)
+        except Exception as e:
+            print(f"[ERROR] Ошибка сохранения файла {filename}: {e}")
 
     return saved_files
 
